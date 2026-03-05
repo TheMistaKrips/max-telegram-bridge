@@ -73,7 +73,7 @@ npm install @maxhub/max-bot-api node-telegram-bot-api axios form-data mime-types
 module.exports = {
   // MAX бот
   max: {
-    token: 'ВАШ_ТОКЕН_ОТ_ПРЕПОДАВАТЕЛЯ', 
+    token: 'ВАШ_ТОКЕН', 
     groupId: null
   },
 
@@ -178,4 +178,5 @@ max-telegram-bridge/
 ├── telegram-bot.js   # Telegram бот
 ├── bridge.js         # Основной мост
 └── package.json      # Зависимости и скрипты
+
 ```
