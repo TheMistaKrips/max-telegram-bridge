@@ -9,7 +9,7 @@ module.exports = {
 
     // Telegram бот (нужно создать через @BotFather)
     telegram: {
-        token: 'YOUR_TELEGRAM_BOT_TOKEN', // Замени на свой токен
+        token: '7890821297:AAHFthTMXjN3oQKfQY_NISrWya9u5kmvvck', // Замени на свой токен
         // ID группы в Telegram (нужно будет заменить на реальный)
         groupId: null // Например: -1001234567890
     },

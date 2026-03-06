@@ -54,9 +54,9 @@ class MaxBot {
     }
 
     async handleStart(ctx) {
-        const user = ctx.user();
+        const userName = ctx.message?.sender?.first_name || 'пользователь';
         await ctx.reply(
-            `👋 Привет, ${user || 'пользователь'}!\n\n` +
+            `👋 Привет, ${userName}!\n\n` +
             `Я бот-мост между MAX и Telegram. ` +
             `Отправь /help чтобы узнать, что я умею.`
         );
@@ -93,7 +93,7 @@ class MaxBot {
     }
 
     async handleSetGroup(ctx) {
-        const chatId = ctx.message.body.chat_id;
+        const chatId = ctx.message?.recipient?.chat_id;
         this.config.max.groupId = chatId;
         await ctx.reply(`✅ Текущая группа установлена для пересылки. ID: ${chatId}`);
         console.log(`MAX группа установлена: ${chatId}`);
@@ -102,7 +102,7 @@ class MaxBot {
     async handleMessage(ctx) {
         try {
             const message = ctx.message;
-            const chatId = message.body.chat_id;
+            const chatId = message?.recipient?.chat_id;
 
             // Проверяем, что сообщение из группы и группа настроена
             if (!this.config.max.groupId || chatId !== this.config.max.groupId) {
@@ -110,38 +110,26 @@ class MaxBot {
             }
 
             // Игнорируем служебные сообщения
-            if (message.body.type !== 'message_created') {
+            if (ctx.update_type !== 'message_created') {
                 return;
             }
 
-            // Получаем информацию об отправителе
-            const userId = message.body.from_id;
-            let userName = 'Пользователь MAX';
-
-            try {
-                // Пытаемся получить имя пользователя
-                const userInfo = await this.bot.api.raw.get(`users/${userId}`);
-                if (userInfo && userInfo.body) {
-                    userName = userInfo.body.name || userInfo.body.username || 'Пользователь MAX';
-                    this.userCache.set(userId, userName);
-                }
-            } catch (error) {
-                // Если не удалось получить имя, используем имя из кэша или дефолтное
-                userName = this.userCache.get(userId) || 'Пользователь MAX';
-            }
+            // Получаем информацию об отправителе напрямую из новой структуры
+            const userId = message?.sender?.user_id;
+            const userName = message?.sender?.name || message?.sender?.first_name || 'Пользователь MAX';
 
             // Формируем текст сообщения
-            let text = message.body.text || '';
+            let text = message?.body?.text || '';
 
             // Добавляем информацию об ответе, если есть
             let replyToMessageId = null;
-            if (message.body.link && message.body.link.type === 'reply') {
+            if (message?.body?.link && message.body.link.type === 'reply') {
                 replyToMessageId = message.body.link.mid;
                 text = `[Ответ на сообщение]\n${text}`;
             }
 
             // Разбиваем длинные сообщения
-            const maxLength = this.config.bridge.maxMessageLength - 500; // Оставляем место для префикса
+            const maxLength = this.config.bridge.maxMessageLength - 500;
             const messages = this.splitMessage(text, maxLength);
 
             // Отправляем каждую часть в очередь
@@ -151,19 +139,17 @@ class MaxBot {
                     : `${userName}:\n${messages[i]}`;
 
                 // Обрабатываем вложения
-                const attachments = message.body.attachments || [];
+                const attachments = message?.body?.attachments || [];
 
                 this.queue.add({
                     sendFunction: async () => {
                         if (attachments.length > 0) {
-                            // Есть медиа - отправляем с медиа
                             await this.telegramBot.sendMediaGroup(
                                 attachments,
                                 partText,
                                 replyToMessageId
                             );
                         } else {
-                            // Только текст
                             await this.telegramBot.sendMessage(
                                 partText,
                                 replyToMessageId

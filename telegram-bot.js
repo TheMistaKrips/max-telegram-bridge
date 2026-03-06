@@ -2,6 +2,9 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const FormData = require('form-data');
 const mime = require('mime-types');
+const fs = require('fs');         // Добавлено для работы с файлами
+const path = require('path');     // Добавлено для путей
+const os = require('os');         // Добавлено для получения папки Temp
 
 class TelegramBotHandler {
     constructor(config, queue, maxBot) {
@@ -188,68 +191,71 @@ class TelegramBotHandler {
     }
 
     async handleMedia(msg, mediaType) {
+        let tempFilePath = null;
         try {
             const chatId = msg.chat.id;
 
+            // Проверка привязки группы
             if (!this.config.telegram.groupId || chatId !== this.config.telegram.groupId) {
                 return;
             }
-
-            const userName = msg.from.first_name ||
-                msg.from.username ||
-                'Пользователь Telegram';
-
-            const caption = msg.caption || '';
-            const fileId = this.getFileId(msg, mediaType);
-
-            if (!fileId) {
-                console.error('Не удалось получить file_id для медиа');
+            if (!this.config.max.groupId) {
+                console.log('⚠️ Медиа из Telegram проигнорировано: группа MAX не привязана (введите /setgroup)');
                 return;
             }
 
-            // Получаем ссылку на файл
-            const fileLink = await this.bot.getFileLink(fileId);
+            const userName = msg.from.first_name || msg.from.username || 'Пользователь Telegram';
+            const caption = msg.caption || '';
+            const fileId = this.getFileId(msg, mediaType);
 
-            // Скачиваем файл
+            if (!fileId) return;
+
+            // 1. Всегда скачиваем файл в оперативную память
+            const fileLink = await this.bot.getFileLink(fileId);
             const response = await axios({
                 method: 'GET',
                 url: fileLink,
-                responseType: 'stream'
+                responseType: 'arraybuffer'
             });
 
-            // Загружаем в MAX
             let attachment;
-            switch (mediaType) {
-                case 'photo':
-                    attachment = await this.maxBot.bot.api.uploadImage({
-                        source: response.data
-                    });
-                    break;
-                case 'video':
-                case 'video_note':
-                    attachment = await this.maxBot.bot.api.uploadVideo({
-                        source: response.data
-                    });
-                    break;
-                case 'audio':
-                case 'voice':
-                    attachment = await this.maxBot.bot.api.uploadAudio({
-                        source: response.data
-                    });
-                    break;
-                case 'document':
-                    attachment = await this.maxBot.bot.api.uploadFile({
-                        source: response.data
-                    });
-                    break;
+
+            // 2. РАЗДЕЛЯЕМ ЛОГИКУ: Фото vs Остальные файлы
+            if (mediaType === 'photo') {
+                // ФОТО: MAX SDK идеально ест Buffer
+                const fileBuffer = Buffer.from(response.data);
+                attachment = await this.maxBot.bot.api.uploadImage({ source: fileBuffer });
+
+            } else {
+                // ВИДЕО, ГОЛОСОВЫЕ, ФАЙЛЫ: MAX SDK требует путь на жестком диске
+                let ext = 'bin';
+                if (mediaType === 'voice') ext = 'ogg';
+                else if (mediaType === 'video' || mediaType === 'video_note') ext = 'mp4';
+                else if (msg.document && msg.document.file_name) {
+                    ext = msg.document.file_name.split('.').pop();
+                } else if (msg.audio && msg.audio.file_name) {
+                    ext = msg.audio.file_name.split('.').pop();
+                }
+
+                tempFilePath = path.join(os.tmpdir(), `tg_media_${fileId}_${Date.now()}.${ext}`);
+                await fs.promises.writeFile(tempFilePath, response.data);
+
+                if (mediaType === 'video' || mediaType === 'video_note') {
+                    attachment = await this.maxBot.bot.api.uploadVideo({ source: tempFilePath });
+                } else if (mediaType === 'audio' || mediaType === 'voice') {
+                    attachment = await this.maxBot.bot.api.uploadAudio({ source: tempFilePath });
+                } else {
+                    attachment = await this.maxBot.bot.api.uploadFile({ source: tempFilePath });
+                }
             }
 
-            // Отправляем в очередь
+            // 3. ОТПРАВЛЯЕМ В ОЧЕРЕДЬ
+            // Теперь официальный toJson() сработает без ошибок
             this.queue.add({
                 sendFunction: async () => {
                     await this.maxBot.bot.api.sendMessageToChat(
                         this.config.max.groupId,
-                        `${userName} (Telegram) отправил ${this.getMediaTypeName(mediaType)}${caption ? ': ' + caption : ''}`,
+                        `${userName} (Telegram) отправил ${this.getMediaTypeName(mediaType)}${caption ? ':\n' + caption : ''}`,
                         {
                             attachments: [attachment.toJson()],
                             format: 'html'
@@ -261,7 +267,12 @@ class TelegramBotHandler {
             console.log(`📨 Медиа из Telegram поставлено в очередь: ${mediaType}`);
 
         } catch (error) {
-            console.error('Ошибка обработки медиа из Telegram:', error);
+            console.error(`❌ Ошибка обработки медиа (${mediaType}) из Telegram:`, error.message || error);
+        } finally {
+            // Обязательно удаляем временный файл
+            if (tempFilePath && fs.existsSync(tempFilePath)) {
+                try { await fs.promises.unlink(tempFilePath); } catch (e) { }
+            }
         }
     }
 
