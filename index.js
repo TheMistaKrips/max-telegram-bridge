@@ -1,9 +1,28 @@
 const config = require('./config');
 const Bridge = require('./bridge');
+const fs = require('fs');
+const path = require('path');
 
-// Обработка завершения программы
+global.msgMap = new Map();
+
+function cleanupTempFiles() {
+    const downloadsDir = path.join(__dirname, 'downloads');
+    if (fs.existsSync(downloadsDir)) {
+        try {
+            const files = fs.readdirSync(downloadsDir);
+            for (const file of files) {
+                fs.unlinkSync(path.join(downloadsDir, file));
+            }
+            console.log('🧹 Временные файлы очищены');
+        } catch (e) {
+            console.error('⚠️ Ошибка очистки:', e);
+        }
+    }
+}
+
 process.on('SIGINT', () => {
-    console.log('\n🛑 Получен сигнал завершения...');
+    console.log('\n🛑 Остановка...');
+    cleanupTempFiles();
     if (global.bridge) {
         global.bridge.stop();
     } else {
@@ -12,7 +31,8 @@ process.on('SIGINT', () => {
 });
 
 process.on('SIGTERM', () => {
-    console.log('\n🛑 Получен сигнал завершения...');
+    console.log('\n🛑 Остановка...');
+    cleanupTempFiles();
     if (global.bridge) {
         global.bridge.stop();
     } else {
@@ -20,38 +40,25 @@ process.on('SIGTERM', () => {
     }
 });
 
-// Обработка необработанных ошибок
 process.on('uncaughtException', (error) => {
     console.error('❌ Необработанная ошибка:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     console.error('❌ Необработанный reject:', reason);
 });
 
-// Запуск моста
 async function main() {
-    console.log('🤖 MAX-Telegram Bridge');
-    console.log('=======================\n');
+    console.log('🤖 MAX-Telegram Bridge\n');
 
-    // Проверяем настройки
-    if (!config.telegram.token || config.telegram.token === 'YOUR_TELEGRAM_BOT_TOKEN') {
-        console.error('❌ Ошибка: Не указан токен Telegram бота!');
-        console.log('1. Создайте бота в @BotFather');
-        console.log('2. Получите токен');
-        console.log('3. Укажите его в config.js');
-        process.exit(1);
+    const downloadsDir = path.join(__dirname, 'downloads');
+    if (!fs.existsSync(downloadsDir)) {
+        fs.mkdirSync(downloadsDir, { recursive: true });
     }
 
-    // Создаем и запускаем мост
     const bridge = new Bridge(config);
-    global.bridge = bridge; // Сохраняем для обработки сигналов
-
+    global.bridge = bridge;
     await bridge.initialize();
 }
 
-// Запускаем приложение
-main().catch(error => {
-    console.error('❌ Критическая ошибка:', error);
-    process.exit(1);
-});
+main().catch(console.error);

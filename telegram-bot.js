@@ -1,10 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const FormData = require('form-data');
-const mime = require('mime-types');
-const fs = require('fs');         // Добавлено для работы с файлами
-const path = require('path');     // Добавлено для путей
-const os = require('os');         // Добавлено для получения папки Temp
 
 class TelegramBotHandler {
     constructor(config, queue, maxBot) {
@@ -12,363 +10,382 @@ class TelegramBotHandler {
         this.queue = queue;
         this.maxBot = maxBot;
         this.bot = null;
-        this.userCache = new Map();
+        this.downloadsDir = path.join(__dirname, 'downloads');
+        this.maxApiUrl = 'https://platform-api.max.ru';
+
+        if (!fs.existsSync(this.downloadsDir)) {
+            fs.mkdirSync(this.downloadsDir, { recursive: true });
+        }
     }
 
     async initialize() {
         try {
+            console.log('🔄 Подключение к Telegram API...');
+
             this.bot = new TelegramBot(this.config.telegram.token, {
                 polling: true
             });
 
-            // Устанавливаем команды
-            await this.bot.setMyCommands([
-                { command: 'start', description: 'Запустить бота' },
-                { command: 'help', description: 'Показать справку' },
-                { command: 'stats', description: 'Статистика работы моста' },
-                { command: 'setgroup', description: 'Установить текущую группу для пересылки' }
-            ]);
+            const me = await this.bot.getMe();
+            console.log(`✅ Telegram бот: @${me.username}`);
 
-            // Обработчики команд
-            this.bot.onText(/\/start/, this.handleStart.bind(this));
-            this.bot.onText(/\/help/, this.handleHelp.bind(this));
-            this.bot.onText(/\/stats/, this.handleStats.bind(this));
-            this.bot.onText(/\/setgroup/, this.handleSetGroup.bind(this));
+            this.bot.onText(/\/setgroup/, (msg) => {
+                const chatId = msg.chat.id;
+                this.config.telegram.groupId = chatId;
+                this.bot.sendMessage(chatId, `✅ Telegram группа установлена! ID: ${chatId}`);
+                console.log(`✅ Telegram группа установлена: ${chatId}`);
+            });
 
-            // Обработчик всех сообщений
-            this.bot.on('message', this.handleMessage.bind(this));
+            this.bot.onText(/\/stats/, (msg) => {
+                const stats = this.queue.getStats();
+                this.bot.sendMessage(
+                    msg.chat.id,
+                    `📊 Статистика:\n` +
+                    `В очереди: ${stats.queueLength}\n` +
+                    `Отправлено: ${stats.sent || 0}\n` +
+                    `Ошибок: ${stats.failed || 0}`
+                );
+            });
 
-            // Обработчик медиа
-            this.bot.on('photo', this.handlePhoto.bind(this));
-            this.bot.on('video', this.handleVideo.bind(this));
-            this.bot.on('document', this.handleDocument.bind(this));
-            this.bot.on('audio', this.handleAudio.bind(this));
-            this.bot.on('voice', this.handleVoice.bind(this));
-            this.bot.on('video_note', this.handleVideoNote.bind(this));
+            this.bot.on('message', async (msg) => {
+                try {
+                    if (msg.text?.startsWith('/')) return;
 
-            console.log('✅ Telegram бот успешно запущен');
-            return true;
-        } catch (error) {
-            console.error('❌ Ошибка запуска Telegram бота:', error);
-            return false;
-        }
-    }
+                    if (!this.config.telegram.groupId || msg.chat.id !== this.config.telegram.groupId) return;
 
-    async handleStart(msg) {
-        const chatId = msg.chat.id;
-        const userName = msg.from.first_name || 'пользователь';
-
-        await this.bot.sendMessage(
-            chatId,
-            `👋 Привет, ${userName}!\n\n` +
-            `Я бот-мост между Telegram и MAX. ` +
-            `Отправь /help чтобы узнать, что я умею.`
-        );
-    }
-
-    async handleHelp(msg) {
-        const chatId = msg.chat.id;
-        await this.bot.sendMessage(
-            chatId,
-            `📚 Доступные команды:\n\n` +
-            `/start - Запустить бота\n` +
-            `/help - Показать эту справку\n` +
-            `/stats - Статистика работы моста\n` +
-            `/setgroup - Установить текущую группу для пересылки\n\n` +
-            `📎 Поддерживаемые типы медиа:\n` +
-            `- Фотографии\n` +
-            `- Видео\n` +
-            `- Документы\n` +
-            `- Аудио\n` +
-            `- Голосовые сообщения\n` +
-            `- Видеосообщения\n\n` +
-            `💬 Для ответа на сообщение используйте функцию reply.`
-        );
-    }
-
-    async handleStats(msg) {
-        const chatId = msg.chat.id;
-        const stats = this.queue.getStats();
-        await this.bot.sendMessage(
-            chatId,
-            `📊 Статистика работы моста:\n\n` +
-            `Всего сообщений: ${stats.total}\n` +
-            `Отправлено: ${stats.sent}\n` +
-            `Ошибок: ${stats.failed}\n` +
-            `В очереди: ${stats.queueLength}\n` +
-            `Ожидают отправки: ${stats.pending}`
-        );
-    }
-
-    async handleSetGroup(msg) {
-        const chatId = msg.chat.id;
-        this.config.telegram.groupId = chatId;
-        await this.bot.sendMessage(chatId, `✅ Текущая группа установлена для пересылки. ID: ${chatId}`);
-        console.log(`Telegram группа установлена: ${chatId}`);
-    }
-
-    async handleMessage(msg) {
-        try {
-            const chatId = msg.chat.id;
-
-            // Проверяем, что сообщение из группы и группа настроена
-            if (!this.config.telegram.groupId || chatId !== this.config.telegram.groupId) {
-                return;
-            }
-
-            // Игнорируем служебные сообщения
-            if (msg.text && msg.text.startsWith('/')) {
-                return;
-            }
-
-            // Получаем информацию об отправителе
-            const userName = msg.from.first_name ||
-                msg.from.username ||
-                'Пользователь Telegram';
-
-            // Проверяем, есть ли ответ на другое сообщение
-            let replyToText = '';
-            if (msg.reply_to_message) {
-                const repliedUser = msg.reply_to_message.from.first_name ||
-                    msg.reply_to_message.from.username ||
-                    'пользователь';
-                replyToText = `[Ответ пользователю ${repliedUser}]\n`;
-            }
-
-            // Формируем текст
-            let text = msg.text || '';
-
-            // Разбиваем длинные сообщения
-            const maxLength = this.config.bridge.maxMessageLength - 500;
-            const messages = this.splitMessage(text, maxLength);
-
-            // Отправляем каждую часть в очередь
-            for (let i = 0; i < messages.length; i++) {
-                const partText = messages.length > 1
-                    ? `${userName} (Telegram) (часть ${i + 1}/${messages.length}):\n${replyToText}${messages[i]}`
-                    : `${userName} (Telegram):\n${replyToText}${messages[i]}`;
-
-                this.queue.add({
-                    sendFunction: async () => {
-                        await this.maxBot.bot.api.sendMessageToChat(
-                            this.config.max.groupId,
-                            partText,
-                            { format: 'html' }
-                        );
+                    if (!this.config.max.groupId) {
+                        this.bot.sendMessage(msg.chat.id, '⚠️ Сначала установите группу в MAX через /setgroup');
+                        return;
                     }
-                });
-            }
 
-            console.log(`📨 Сообщение из Telegram поставлено в очередь: ${text.substring(0, 50)}...`);
+                    console.log('📩 Получено сообщение из Telegram для пересылки');
 
-        } catch (error) {
-            console.error('Ошибка обработки сообщения из Telegram:', error);
-        }
-    }
+                    const tgMsgId = msg.message_id;
+                    const userName = msg.from.first_name || msg.from.username || 'Пользователь Telegram';
 
-    async handlePhoto(msg) {
-        await this.handleMedia(msg, 'photo');
-    }
+                    // Определяем тип медиа
+                    let mediaInfo = null;
 
-    async handleVideo(msg) {
-        await this.handleMedia(msg, 'video');
-    }
+                    if (msg.photo) {
+                        const photo = msg.photo[msg.photo.length - 1];
+                        mediaInfo = {
+                            type: 'photo',
+                            fileId: photo.file_id,
+                            fileName: `photo_${Date.now()}.jpg`
+                        };
+                    } else if (msg.video) {
+                        mediaInfo = {
+                            type: 'video',
+                            fileId: msg.video.file_id,
+                            fileName: msg.video.file_name || `video_${Date.now()}.mp4`
+                        };
+                    } else if (msg.document) {
+                        mediaInfo = {
+                            type: 'document',
+                            fileId: msg.document.file_id,
+                            fileName: msg.document.file_name || `document_${Date.now()}.bin`
+                        };
+                    } else if (msg.audio) {
+                        mediaInfo = {
+                            type: 'audio',
+                            fileId: msg.audio.file_id,
+                            fileName: msg.audio.file_name || `audio_${Date.now()}.mp3`
+                        };
+                    } else if (msg.voice) {
+                        mediaInfo = {
+                            type: 'voice',
+                            fileId: msg.voice.file_id,
+                            fileName: `voice_${Date.now()}.ogg`
+                        };
+                    } else if (msg.video_note) {
+                        mediaInfo = {
+                            type: 'video_note',
+                            fileId: msg.video_note.file_id,
+                            fileName: `video_note_${Date.now()}.mp4`
+                        };
+                    }
 
-    async handleDocument(msg) {
-        await this.handleMedia(msg, 'document');
-    }
+                    // Получаем ID для ответа
+                    let maxReplyTo = null;
+                    if (msg.reply_to_message) {
+                        maxReplyTo = global.msgMap.get(`tg_${msg.reply_to_message.message_id}`);
+                        console.log(`📎 Ответ на Telegram сообщение ${msg.reply_to_message.message_id} -> MAX ID: ${maxReplyTo}`);
+                    }
 
-    async handleAudio(msg) {
-        await this.handleMedia(msg, 'audio');
-    }
+                    this.queue.add({
+                        sendFunction: async () => {
+                            try {
+                                let sentMax;
 
-    async handleVoice(msg) {
-        await this.handleMedia(msg, 'voice');
-    }
+                                if (mediaInfo) {
+                                    console.log(`📤 Загружаю медиа в MAX: ${mediaInfo.type}`);
 
-    async handleVideoNote(msg) {
-        await this.handleMedia(msg, 'video_note');
-    }
+                                    // Получаем ссылку на файл из Telegram
+                                    const fileLink = await this.bot.getFileLink(mediaInfo.fileId);
+                                    console.log(`📥 Ссылка на файл: ${fileLink}`);
 
-    async handleMedia(msg, mediaType) {
-        let tempFilePath = null;
-        try {
-            const chatId = msg.chat.id;
+                                    // Скачиваем файл
+                                    const tempFilePath = path.join(this.downloadsDir, `tg_${Date.now()}_${mediaInfo.fileName}`);
 
-            // Проверка привязки группы
-            if (!this.config.telegram.groupId || chatId !== this.config.telegram.groupId) {
-                return;
-            }
-            if (!this.config.max.groupId) {
-                console.log('⚠️ Медиа из Telegram проигнорировано: группа MAX не привязана (введите /setgroup)');
-                return;
-            }
+                                    const response = await axios({
+                                        method: 'GET',
+                                        url: fileLink,
+                                        responseType: 'arraybuffer',
+                                        timeout: 60000
+                                    });
 
-            const userName = msg.from.first_name || msg.from.username || 'Пользователь Telegram';
-            const caption = msg.caption || '';
-            const fileId = this.getFileId(msg, mediaType);
+                                    fs.writeFileSync(tempFilePath, response.data);
+                                    console.log(`✅ Файл скачан: ${response.data.length} байт`);
 
-            if (!fileId) return;
+                                    let uploadResult;
+                                    let attachment;
+                                    let token = null;
 
-            // 1. Всегда скачиваем файл в оперативную память
-            const fileLink = await this.bot.getFileLink(fileId);
-            const response = await axios({
-                method: 'GET',
-                url: fileLink,
-                responseType: 'arraybuffer'
-            });
+                                    try {
+                                        // ДЛЯ ДОКУМЕНТОВ ИСПОЛЬЗУЕМ НОВЫЙ API
+                                        if (mediaInfo.type === 'document') {
+                                            console.log('📄 Загрузка документа через API...');
 
-            let attachment;
+                                            // Получаем URL для загрузки файла
+                                            const uploadUrlResponse = await axios({
+                                                method: 'POST',
+                                                url: `${this.maxApiUrl}/uploads?type=file`,
+                                                headers: {
+                                                    'Authorization': this.config.max.token
+                                                }
+                                            });
 
-            // 2. РАЗДЕЛЯЕМ ЛОГИКУ: Фото vs Остальные файлы
-            if (mediaType === 'photo') {
-                // ФОТО: MAX SDK идеально ест Buffer
-                const fileBuffer = Buffer.from(response.data);
-                attachment = await this.maxBot.bot.api.uploadImage({ source: fileBuffer });
+                                            const uploadUrl = uploadUrlResponse.data.url;
+                                            console.log(`📥 Получен URL для загрузки: ${uploadUrl}`);
 
-            } else {
-                // ВИДЕО, ГОЛОСОВЫЕ, ФАЙЛЫ: MAX SDK требует путь на жестком диске
-                let ext = 'bin';
-                if (mediaType === 'voice') ext = 'ogg';
-                else if (mediaType === 'video' || mediaType === 'video_note') ext = 'mp4';
-                else if (msg.document && msg.document.file_name) {
-                    ext = msg.document.file_name.split('.').pop();
-                } else if (msg.audio && msg.audio.file_name) {
-                    ext = msg.audio.file_name.split('.').pop();
-                }
+                                            // Загружаем файл в MAX
+                                            const formData = new FormData();
+                                            formData.append('data', fs.createReadStream(tempFilePath));
 
-                tempFilePath = path.join(os.tmpdir(), `tg_media_${fileId}_${Date.now()}.${ext}`);
-                await fs.promises.writeFile(tempFilePath, response.data);
+                                            const uploadResponse = await axios({
+                                                method: 'POST',
+                                                url: uploadUrl,
+                                                headers: {
+                                                    ...formData.getHeaders()
+                                                },
+                                                data: formData,
+                                                maxContentLength: Infinity,
+                                                maxBodyLength: Infinity
+                                            });
 
-                if (mediaType === 'video' || mediaType === 'video_note') {
-                    attachment = await this.maxBot.bot.api.uploadVideo({ source: tempFilePath });
-                } else if (mediaType === 'audio' || mediaType === 'voice') {
-                    attachment = await this.maxBot.bot.api.uploadAudio({ source: tempFilePath });
-                } else {
-                    attachment = await this.maxBot.bot.api.uploadFile({ source: tempFilePath });
-                }
-            }
+                                            console.log(`✅ Файл загружен в MAX`);
 
-            // 3. ОТПРАВЛЯЕМ В ОЧЕРЕДЬ
-            // Теперь официальный toJson() сработает без ошибок
-            this.queue.add({
-                sendFunction: async () => {
-                    await this.maxBot.bot.api.sendMessageToChat(
-                        this.config.max.groupId,
-                        `${userName} (Telegram) отправил ${this.getMediaTypeName(mediaType)}${caption ? ':\n' + caption : ''}`,
-                        {
-                            attachments: [attachment.toJson()],
-                            format: 'html'
-                        }
-                    );
-                }
-            });
+                                            // Получаем токен
+                                            const responseData = uploadResponse.data;
 
-            console.log(`📨 Медиа из Telegram поставлено в очередь: ${mediaType}`);
+                                            if (typeof responseData === 'string') {
+                                                try {
+                                                    const parsed = JSON.parse(responseData);
+                                                    token = parsed.token || parsed.id || parsed.file_id;
+                                                } catch (e) {
+                                                    token = responseData;
+                                                }
+                                            } else {
+                                                token = responseData.token || responseData.id || responseData.file_id;
+                                            }
 
-        } catch (error) {
-            console.error(`❌ Ошибка обработки медиа (${mediaType}) из Telegram:`, error.message || error);
-        } finally {
-            // Обязательно удаляем временный файл
-            if (tempFilePath && fs.existsSync(tempFilePath)) {
-                try { await fs.promises.unlink(tempFilePath); } catch (e) { }
-            }
-        }
-    }
+                                            if (token) {
+                                                console.log(`✅ Получен токен: ${token}`);
+                                                attachment = {
+                                                    type: 'file',
+                                                    payload: { token }
+                                                };
+                                            }
 
-    getFileId(msg, mediaType) {
-        switch (mediaType) {
-            case 'photo':
-                return msg.photo[msg.photo.length - 1].file_id;
-            case 'video':
-                return msg.video.file_id;
-            case 'document':
-                return msg.document.file_id;
-            case 'audio':
-                return msg.audio.file_id;
-            case 'voice':
-                return msg.voice.file_id;
-            case 'video_note':
-                return msg.video_note.file_id;
-            default:
-                return null;
-        }
-    }
+                                            // Пауза для обработки
+                                            await new Promise(resolve => setTimeout(resolve, 2000));
 
-    getMediaTypeName(mediaType) {
-        const names = {
-            photo: 'фото',
-            video: 'видео',
-            video_note: 'видеосообщение',
-            document: 'документ',
-            audio: 'аудио',
-            voice: 'голосовое сообщение'
-        };
-        return names[mediaType] || mediaType;
-    }
+                                        } else {
+                                            // ДЛЯ ФОТО, ВИДЕО, АУДИО ИСПОЛЬЗУЕМ СТАРЫЙ МЕТОД
+                                            console.log('🎨 Загрузка медиа через старый метод...');
 
-    splitMessage(text, maxLength) {
-        if (text.length <= maxLength) {
-            return [text];
-        }
+                                            if (mediaInfo.type === 'photo') {
+                                                uploadResult = await this.maxBot.bot.api.uploadImage({
+                                                    source: fs.readFileSync(tempFilePath)
+                                                });
+                                            } else if (mediaInfo.type === 'video' || mediaInfo.type === 'video_note') {
+                                                uploadResult = await this.maxBot.bot.api.uploadVideo({
+                                                    source: tempFilePath
+                                                });
+                                            } else if (mediaInfo.type === 'audio' || mediaInfo.type === 'voice') {
+                                                uploadResult = await this.maxBot.bot.api.uploadAudio({
+                                                    source: tempFilePath
+                                                });
+                                            }
 
-        const parts = [];
-        let currentPart = '';
+                                            console.log(`✅ Файл загружен в MAX API`);
+                                            console.log(`📦 Ответ от MAX:`, JSON.stringify(uploadResult).substring(0, 200));
 
-        const sentences = text.split(/(?<=[.!?])\s+/);
+                                            // ИЗВЛЕКАЕМ ТОКЕН ДЛЯ ФОТО (ОСОБАЯ СТРУКТУРА)
+                                            if (uploadResult) {
+                                                // Для фото может быть структура { photos: { "id": { token: "..." } } }
+                                                if (uploadResult.photos) {
+                                                    const photoKeys = Object.keys(uploadResult.photos);
+                                                    if (photoKeys.length > 0) {
+                                                        const firstPhoto = uploadResult.photos[photoKeys[0]];
+                                                        token = firstPhoto?.token;
+                                                        console.log(`✅ Найден токен в photos: ${token}`);
+                                                    }
+                                                }
+                                                // Для видео/аудио может быть прямой token
+                                                else if (uploadResult.token) {
+                                                    token = uploadResult.token;
+                                                }
+                                                else if (uploadResult.payload?.token) {
+                                                    token = uploadResult.payload.token;
+                                                }
+                                                else if (uploadResult.id) {
+                                                    token = uploadResult.id;
+                                                }
+                                                else if (uploadResult.file_id) {
+                                                    token = uploadResult.file_id;
+                                                }
 
-        for (const sentence of sentences) {
-            if ((currentPart + sentence).length <= maxLength) {
-                currentPart += (currentPart ? ' ' : '') + sentence;
-            } else {
-                if (currentPart) {
-                    parts.push(currentPart);
-                    currentPart = sentence;
-                } else {
-                    const words = sentence.split(' ');
-                    currentPart = '';
-                    for (const word of words) {
-                        if ((currentPart + word).length <= maxLength) {
-                            currentPart += (currentPart ? ' ' : '') + word;
-                        } else {
-                            if (currentPart) {
-                                parts.push(currentPart);
-                                currentPart = word;
-                            } else {
-                                while (word.length > maxLength) {
-                                    parts.push(word.substring(0, maxLength));
-                                    word = word.substring(maxLength);
+                                                // Если не нашли, пробуем распарсить строку
+                                                if (!token && typeof uploadResult === 'string') {
+                                                    try {
+                                                        const parsed = JSON.parse(uploadResult);
+                                                        if (parsed.photos) {
+                                                            const photoKeys = Object.keys(parsed.photos);
+                                                            if (photoKeys.length > 0) {
+                                                                token = parsed.photos[photoKeys[0]]?.token;
+                                                            }
+                                                        } else {
+                                                            token = parsed.token || parsed.id || parsed.file_id;
+                                                        }
+                                                    } catch (e) { }
+                                                }
+                                            }
+
+                                            if (token) {
+                                                console.log(`✅ Получен токен: ${token}`);
+
+                                                let maxType = mediaInfo.type;
+                                                if (mediaInfo.type === 'photo') maxType = 'image';
+                                                else if (mediaInfo.type === 'voice') maxType = 'audio';
+                                                else if (mediaInfo.type === 'video_note') maxType = 'video';
+
+                                                attachment = {
+                                                    type: maxType,
+                                                    payload: { token }
+                                                };
+                                            } else {
+                                                console.log('⚠️ Токен не найден в ответе');
+                                            }
+                                        }
+
+                                        if (attachment) {
+                                            // Отправляем сообщение с вложением
+                                            const options = {
+                                                format: 'html',
+                                                attachments: [attachment]
+                                            };
+
+                                            if (maxReplyTo) {
+                                                options.link = { type: 'reply', mid: maxReplyTo };
+                                                console.log(`🔄 Будет ответ на MAX сообщение: ${maxReplyTo}`);
+                                            }
+
+                                            const caption = msg.caption ? `<b>${userName} (Telegram):</b>\n${msg.caption}` : '';
+
+                                            console.log(`📤 Отправляю в MAX с вложением...`);
+                                            sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                                this.config.max.groupId,
+                                                caption,
+                                                options
+                                            );
+                                            console.log(`✅ Сообщение с медиа отправлено в MAX`);
+                                        } else {
+                                            console.log('⚠️ Не удалось получить токен, отправляю как текст');
+
+                                            // Отправляем как текст с информацией
+                                            const text = `<b>${userName} (Telegram):</b>\n[Файл: ${mediaInfo.fileName}]`;
+                                            const options = { format: 'html' };
+                                            if (maxReplyTo) {
+                                                options.link = { type: 'reply', mid: maxReplyTo };
+                                            }
+                                            sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                                this.config.max.groupId,
+                                                text,
+                                                options
+                                            );
+                                        }
+
+                                    } catch (uploadError) {
+                                        console.error('❌ Ошибка загрузки в MAX:', uploadError.message);
+                                        if (uploadError.response) {
+                                            console.error('Детали:', uploadError.response.data);
+                                        }
+
+                                        // Отправляем как текст с информацией
+                                        const text = `<b>${userName} (Telegram):</b>\n[Файл: ${mediaInfo.fileName}]`;
+                                        const options = { format: 'html' };
+                                        if (maxReplyTo) {
+                                            options.link = { type: 'reply', mid: maxReplyTo };
+                                        }
+                                        sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                            this.config.max.groupId,
+                                            text,
+                                            options
+                                        );
+                                    } finally {
+                                        // Удаляем временный файл
+                                        try { fs.unlinkSync(tempFilePath); } catch (e) { }
+                                    }
+
+                                } else if (msg.text) {
+                                    // Отправляем текст
+                                    const options = { format: 'html' };
+
+                                    if (maxReplyTo) {
+                                        options.link = { type: 'reply', mid: maxReplyTo };
+                                        console.log(`🔄 Будет ответ на MAX сообщение: ${maxReplyTo}`);
+                                    }
+
+                                    const text = `<b>${userName} (Telegram):</b>\n${msg.text}`;
+
+                                    console.log(`📤 Отправляю текст в MAX...`);
+                                    sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                        this.config.max.groupId,
+                                        text,
+                                        options
+                                    );
+                                    console.log(`✅ Текст отправлен в MAX`);
                                 }
-                                currentPart = word;
+
+                                // Сохраняем связь сообщений
+                                if (sentMax) {
+                                    const sentMid = sentMax?.body?.mid || sentMax?.mid;
+                                    if (sentMid) {
+                                        global.msgMap.set(`tg_${tgMsgId}`, sentMid);
+                                        global.msgMap.set(`max_${sentMid}`, tgMsgId);
+                                        console.log(`🔗 Связано TG:${tgMsgId} <-> MAX:${sentMid}`);
+                                    }
+                                }
+
+                            } catch (error) {
+                                console.error('❌ Ошибка отправки в MAX:', error.message);
+                                throw error;
                             }
                         }
-                    }
+                    });
+
+                } catch (error) {
+                    console.error('Ошибка обработки:', error);
                 }
-            }
-        }
-
-        if (currentPart) {
-            parts.push(currentPart);
-        }
-
-        return parts;
-    }
-
-    async sendMessage(text, replyToMessageId = null) {
-        try {
-            await this.bot.sendMessage(this.config.telegram.groupId, text, {
-                reply_to_message_id: replyToMessageId
             });
-        } catch (error) {
-            console.error('Ошибка отправки сообщения в Telegram:', error);
-            throw error;
-        }
-    }
 
-    async sendMediaGroup(attachments, caption, replyToMessageId = null) {
-        // TODO: Реализовать отправку группы медиа в Telegram
-        // Пока отправляем как обычное сообщение
-        await this.sendMessage(caption, replyToMessageId);
+            return true;
+
+        } catch (error) {
+            console.error('❌ Ошибка Telegram:', error.message);
+            return false;
+        }
     }
 }
 

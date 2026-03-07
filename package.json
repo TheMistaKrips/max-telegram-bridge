@@ -9,7 +9,7 @@
     "dependencies": {
         "@maxhub/max-bot-api": "^0.2.2",
         "axios": "^1.6.0",
-        "form-data": "^4.0.0",
+        "form-data": "^4.0.5",
         "mime-types": "^2.1.35",
         "node-telegram-bot-api": "^0.64.0"
     }

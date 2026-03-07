@@ -1,106 +1,75 @@
-// Класс для управления очередью сообщений
 class MessageQueue {
     constructor(options = {}) {
         this.queue = [];
         this.processing = false;
-        this.interval = options.interval || 1000;
-        this.maxPerInterval = options.maxPerInterval || 20;
+        this.interval = options.interval || 2000;
+        this.maxPerInterval = options.maxPerInterval || 3;
         this.stats = {
             total: 0,
             sent: 0,
-            failed: 0,
-            pending: 0
+            failed: 0
         };
     }
 
-    // Добавить сообщение в очередь
     add(message) {
         this.queue.push({
             ...message,
-            id: `${Date.now()}-${Math.random()}`,
-            timestamp: Date.now(),
+            id: Date.now() + Math.random(),
             attempts: 0
         });
         this.stats.total++;
-        this.stats.pending++;
 
         if (!this.processing) {
             this.process();
         }
-
-        return this.queue.length;
     }
 
-    // Обработка очереди
     async process() {
-        if (this.processing || this.queue.length === 0) {
-            return;
-        }
+        if (this.processing || this.queue.length === 0) return;
 
         this.processing = true;
 
-        try {
-            // Берем сообщения для отправки в этом интервале
-            const toSend = this.queue.splice(0, this.maxPerInterval);
+        const toSend = this.queue.splice(0, this.maxPerInterval);
+        const failed = [];
 
-            // Отправляем сообщения параллельно
-            const promises = toSend.map(async (message) => {
-                try {
-                    await message.sendFunction();
-                    this.stats.sent++;
-                    this.stats.pending--;
-                    return { success: true, message };
-                } catch (error) {
-                    console.error(`Ошибка отправки сообщения ${message.id}:`, error);
+        for (const message of toSend) {
+            try {
+                console.log(`📤 Отправка сообщения (попытка ${message.attempts + 1})...`);
+                await message.sendFunction();
+                this.stats.sent++;
+                console.log(`✅ Сообщение отправлено`);
+            } catch (error) {
+                console.error(`❌ Ошибка (попытка ${message.attempts + 1}):`, error.message);
 
-                    // Пробуем снова, если не превышен лимит попыток
-                    if (message.attempts < 3) {
-                        message.attempts++;
-                        this.queue.push(message);
-                    } else {
-                        this.stats.failed++;
-                        this.stats.pending--;
-                        console.error(`Сообщение ${message.id} окончательно не отправлено после 3 попыток`);
-                    }
-                    return { success: false, message };
+                if (message.attempts < 3) {
+                    message.attempts++;
+                    failed.push(message);
+                    console.log(`🔄 Повтор через ${this.interval}ms`);
+                } else {
+                    this.stats.failed++;
+                    console.error(`❌ Сообщение не отправлено после 3 попыток`);
                 }
-            });
-
-            await Promise.all(promises);
-
-            // Если остались сообщения, планируем следующую отправку
-            if (this.queue.length > 0) {
-                setTimeout(() => {
-                    this.processing = false;
-                    this.process();
-                }, this.interval);
-            } else {
-                this.processing = false;
             }
 
-        } catch (error) {
-            console.error('Ошибка обработки очереди:', error);
-            this.processing = false;
+            await new Promise(r => setTimeout(r, 500));
+        }
 
-            // Пробуем снова через интервал
-            if (this.queue.length > 0) {
-                setTimeout(() => this.process(), this.interval);
-            }
+        if (failed.length > 0) {
+            this.queue.unshift(...failed);
+        }
+
+        this.processing = false;
+
+        if (this.queue.length > 0) {
+            setTimeout(() => this.process(), this.interval);
         }
     }
 
-    // Получить статистику очереди
     getStats() {
         return {
             ...this.stats,
             queueLength: this.queue.length
         };
-    }
-
-    // Очистить очередь
-    clear() {
-        this.queue = [];
-        this.stats.pending = 0;
     }
 }
 
