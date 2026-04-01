@@ -13,7 +13,7 @@ class TelegramBotHandler {
         this.downloadsDir = path.join(__dirname, 'downloads');
         this.maxApiUrl = 'https://platform-api.max.ru';
         // Максимальная длина текста в MAX API
-        this.MAX_TEXT_LENGTH = 3950;
+        this.MAX_TEXT_LENGTH = 3600;
 
         if (!fs.existsSync(this.downloadsDir)) {
             fs.mkdirSync(this.downloadsDir, { recursive: true });
