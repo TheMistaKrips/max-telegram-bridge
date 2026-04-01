@@ -12,10 +12,123 @@ class TelegramBotHandler {
         this.bot = null;
         this.downloadsDir = path.join(__dirname, 'downloads');
         this.maxApiUrl = 'https://platform-api.max.ru';
+        // Максимальная длина текста в MAX API
+        this.MAX_TEXT_LENGTH = 4000;
 
         if (!fs.existsSync(this.downloadsDir)) {
             fs.mkdirSync(this.downloadsDir, { recursive: true });
         }
+    }
+
+    /**
+     * Разбивает длинный текст на части для MAX API
+     * @param {string} text - Исходный текст сообщения
+     * @returns {string[]} Массив строк, каждая не длиннее MAX_TEXT_LENGTH
+     */
+    splitMessageForMax(text) {
+        // Если текст не превышает лимит, возвращаем как есть
+        if (text.length <= this.MAX_TEXT_LENGTH) {
+            return [text];
+        }
+
+        const parts = [];
+        let remaining = text;
+
+        while (remaining.length > this.MAX_TEXT_LENGTH) {
+            // Ищем последний пробел в пределах MAX_TEXT_LENGTH
+            let splitAt = remaining.lastIndexOf(' ', this.MAX_TEXT_LENGTH);
+            
+            // Если пробелов нет в пределах лимита, режем по лимиту
+            if (splitAt === -1) {
+                splitAt = this.MAX_TEXT_LENGTH;
+            }
+            
+            // Добавляем часть
+            parts.push(remaining.substring(0, splitAt));
+            
+            // Обновляем остаток текста, убирая пробелы в начале
+            remaining = remaining.substring(splitAt).trimStart();
+        }
+        
+        // Добавляем последнюю часть
+        if (remaining.length > 0) {
+            parts.push(remaining);
+        }
+        
+        return parts;
+    }
+
+    /**
+     * Отправляет текст в MAX с автоматическим разбиением на части
+     * @param {string} userName - Имя пользователя Telegram
+     * @param {string} text - Текст сообщения
+     * @param {object} options - Опции отправки (replyTo, format и т.д.)
+     * @returns {Promise<Array>} Массив результатов отправки
+     */
+    async sendTextToMax(userName, text, options = {}) {
+        // Формируем полный текст с именем пользователя
+        const fullText = `<b>${userName} (Telegram):</b>\n${text}`;
+        
+        // Разбиваем текст на части
+        const parts = this.splitMessageForMax(fullText);
+        
+        if (parts.length === 1) {
+            // Если одна часть, отправляем как обычно
+            console.log(`📤 Отправляю текст в MAX (${fullText.length} символов)...`);
+            return await this.maxBot.bot.api.sendMessageToChat(
+                this.config.max.groupId,
+                parts[0],
+                options
+            );
+        }
+        
+        // Если несколько частей, отправляем последовательно
+        console.log(`📝 Текст разбит на ${parts.length} частей (всего ${fullText.length} символов)`);
+        const results = [];
+        
+        for (let i = 0; i < parts.length; i++) {
+            // Добавляем индикатор части для всех сообщений, кроме первого
+            let messageToSend = parts[i];
+            let partOptions = { ...options };
+            
+            if (i === 0) {
+                // Первое сообщение: добавляем индикатор, что будут продолжения
+                messageToSend = `${parts[i]}\n\n[Продолжение следует...]`;
+            } else if (i === parts.length - 1) {
+                // Последнее сообщение: добавляем индикатор завершения
+                messageToSend = `[Продолжение ${i + 1}/${parts.length}]\n${parts[i]}\n\n[Сообщение завершено]`;
+            } else {
+                // Промежуточные сообщения
+                messageToSend = `[Продолжение ${i + 1}/${parts.length}]\n${parts[i]}`;
+            }
+            
+            // Для частей, начиная со второй, не используем reply (чтобы не запутать структуру)
+            if (i > 0 && partOptions.link) {
+                delete partOptions.link;
+                console.log(`⚠️ Для части ${i + 1} убран reply, чтобы не нарушать структуру`);
+            }
+            
+            console.log(`📤 Отправляю часть ${i + 1}/${parts.length} (${messageToSend.length} символов)...`);
+            
+            try {
+                const result = await this.maxBot.bot.api.sendMessageToChat(
+                    this.config.max.groupId,
+                    messageToSend,
+                    partOptions
+                );
+                results.push(result);
+                
+                // Задержка между отправками (150 мс)
+                if (i < parts.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                }
+            } catch (error) {
+                console.error(`❌ Ошибка отправки части ${i + 1}:`, error.message);
+                throw error;
+            }
+        }
+        
+        return results;
     }
 
     async initialize() {
@@ -294,11 +407,48 @@ class TelegramBotHandler {
                                             const caption = msg.caption ? `<b>${userName} (Telegram):</b>\n${msg.caption}` : '';
 
                                             console.log(`📤 Отправляю в MAX с вложением...`);
-                                            sentMax = await this.maxBot.bot.api.sendMessageToChat(
-                                                this.config.max.groupId,
-                                                caption,
-                                                options
-                                            );
+                                            
+                                            // Проверяем длину caption и разбиваем если нужно
+                                            if (caption.length > this.MAX_TEXT_LENGTH) {
+                                                console.log(`⚠️ Caption слишком длинный (${caption.length} символов), разбиваю...`);
+                                                const captionParts = this.splitMessageForMax(caption);
+                                                
+                                                // Отправляем первое сообщение с медиа
+                                                sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                                    this.config.max.groupId,
+                                                    captionParts[0],
+                                                    options
+                                                );
+                                                
+                                                // Сохраняем связь для первого сообщения
+                                                if (sentMax) {
+                                                    const sentMid = sentMax?.body?.mid || sentMax?.mid;
+                                                    if (sentMid) {
+                                                        global.msgMap.set(`tg_${tgMsgId}_part1`, sentMid);
+                                                    }
+                                                }
+                                                
+                                                // Отправляем остальные части caption как обычные сообщения
+                                                for (let i = 1; i < captionParts.length; i++) {
+                                                    const partOptions = { format: 'html' };
+                                                    if (maxReplyTo && i === 1) {
+                                                        partOptions.link = { type: 'reply', mid: maxReplyTo };
+                                                    }
+                                                    
+                                                    await new Promise(resolve => setTimeout(resolve, 150));
+                                                    await this.maxBot.bot.api.sendMessageToChat(
+                                                        this.config.max.groupId,
+                                                        captionParts[i],
+                                                        partOptions
+                                                    );
+                                                }
+                                            } else {
+                                                sentMax = await this.maxBot.bot.api.sendMessageToChat(
+                                                    this.config.max.groupId,
+                                                    caption,
+                                                    options
+                                                );
+                                            }
                                             console.log(`✅ Сообщение с медиа отправлено в MAX`);
                                         } else {
                                             console.log('⚠️ Не удалось получить токен, отправляю как текст');
@@ -339,7 +489,7 @@ class TelegramBotHandler {
                                     }
 
                                 } else if (msg.text) {
-                                    // Отправляем текст
+                                    // Отправляем текст с использованием нового метода с разбиением
                                     const options = { format: 'html' };
 
                                     if (maxReplyTo) {
@@ -347,15 +497,11 @@ class TelegramBotHandler {
                                         console.log(`🔄 Будет ответ на MAX сообщение: ${maxReplyTo}`);
                                     }
 
-                                    const text = `<b>${userName} (Telegram):</b>\n${msg.text}`;
-
-                                    console.log(`📤 Отправляю текст в MAX...`);
-                                    sentMax = await this.maxBot.bot.api.sendMessageToChat(
-                                        this.config.max.groupId,
-                                        text,
-                                        options
-                                    );
-                                    console.log(`✅ Текст отправлен в MAX`);
+                                    // Используем новый метод для отправки текста с разбиением
+                                    const results = await this.sendTextToMax(userName, msg.text, options);
+                                    
+                                    // Для совместимости с сохранением связи сообщений
+                                    sentMax = Array.isArray(results) ? results[0] : results;
                                 }
 
                                 // Сохраняем связь сообщений
