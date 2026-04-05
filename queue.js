@@ -4,60 +4,39 @@ class MessageQueue {
         this.processing = false;
         this.interval = options.interval || 2000;
         this.maxPerInterval = options.maxPerInterval || 3;
-        this.stats = {
-            total: 0,
-            sent: 0,
-            failed: 0
-        };
+        this.stats = { total: 0, sent: 0, failed: 0 };
     }
 
     add(message) {
-        this.queue.push({
-            ...message,
-            id: Date.now() + Math.random(),
-            attempts: 0
-        });
+        this.queue.push({ ...message, attempts: 0 });
         this.stats.total++;
-
-        if (!this.processing) {
-            this.process();
-        }
+        if (!this.processing) this.process();
     }
 
     async process() {
         if (this.processing || this.queue.length === 0) return;
 
         this.processing = true;
-
-        const toSend = this.queue.splice(0, this.maxPerInterval);
+        const batch = this.queue.splice(0, this.maxPerInterval);
         const failed = [];
 
-        for (const message of toSend) {
+        for (const item of batch) {
             try {
-                console.log(`📤 Отправка сообщения (попытка ${message.attempts + 1})...`);
-                await message.sendFunction();
+                await item.sendFunction();
                 this.stats.sent++;
-                console.log(`✅ Сообщение отправлено`);
             } catch (error) {
-                console.error(`❌ Ошибка (попытка ${message.attempts + 1}):`, error.message);
-
-                if (message.attempts < 3) {
-                    message.attempts++;
-                    failed.push(message);
-                    console.log(`🔄 Повтор через ${this.interval}ms`);
+                console.error('queue send error:', error.message);
+                if (item.attempts < 3) {
+                    item.attempts++;
+                    failed.push(item);
                 } else {
                     this.stats.failed++;
-                    console.error(`❌ Сообщение не отправлено после 3 попыток`);
                 }
             }
-
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise((r) => setTimeout(r, 500));
         }
 
-        if (failed.length > 0) {
-            this.queue.unshift(...failed);
-        }
-
+        if (failed.length) this.queue.unshift(...failed);
         this.processing = false;
 
         if (this.queue.length > 0) {
@@ -66,10 +45,7 @@ class MessageQueue {
     }
 
     getStats() {
-        return {
-            ...this.stats,
-            queueLength: this.queue.length
-        };
+        return { ...this.stats, queueLength: this.queue.length };
     }
 }
 

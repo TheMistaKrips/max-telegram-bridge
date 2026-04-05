@@ -11,36 +11,25 @@ class Bridge {
     }
 
     async initialize() {
-        console.log('🚀 Инициализация моста MAX-Telegram...\n');
-
         this.telegramBot = new TelegramBotHandler(this.config, this.queue, null);
         this.maxBot = new MaxBot(this.config, this.queue, this.telegramBot);
-
         this.telegramBot.maxBot = this.maxBot;
 
-        console.log('🔄 Запуск Telegram бота...');
-        const telegramStarted = await this.telegramBot.initialize();
-
-        if (!telegramStarted) {
-            console.error('❌ Telegram бот не запущен');
+        const telegramOk = await this.telegramBot.initialize();
+        if (!telegramOk) {
+            console.error('telegram bot failed to start');
             process.exit(1);
         }
 
-        console.log('🔄 Запуск MAX бота...');
-        const maxStarted = await this.maxBot.initialize();
-
-        if (maxStarted) {
-            console.log('\n✅ Мост успешно запущен!');
-            console.log('\n📝 Настройка:');
-            console.log('1. В MAX группе отправьте /setgroup');
-            console.log('2. В Telegram группе отправьте /setgroup');
+        const maxOk = await this.maxBot.initialize();
+        if (maxOk) {
+            console.log('bridge running; /setgroup in MAX group, then in Telegram group');
         } else {
-            console.error('\n❌ MAX бот не запущен');
+            console.error('MAX bot failed to start');
         }
     }
 
     async stop() {
-        console.log('\n🛑 Остановка...');
         if (this.telegramBot?.bot) {
             await this.telegramBot.bot.stopPolling();
         }

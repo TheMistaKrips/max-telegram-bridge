@@ -7,49 +7,34 @@ global.msgMap = new Map();
 
 function cleanupTempFiles() {
     const downloadsDir = path.join(__dirname, 'downloads');
-    if (fs.existsSync(downloadsDir)) {
-        try {
-            const files = fs.readdirSync(downloadsDir);
-            for (const file of files) {
-                fs.unlinkSync(path.join(downloadsDir, file));
-            }
-            console.log('🧹 Временные файлы очищены');
-        } catch (e) {
-            console.error('⚠️ Ошибка очистки:', e);
+    if (!fs.existsSync(downloadsDir)) return;
+    try {
+        for (const file of fs.readdirSync(downloadsDir)) {
+            fs.unlinkSync(path.join(downloadsDir, file));
         }
+        console.log('downloads cleared');
+    } catch (e) {
+        console.error('cleanup failed:', e);
     }
 }
 
-process.on('SIGINT', () => {
-    console.log('\n🛑 Остановка...');
+function onShutdown() {
+    console.log('shutting down');
     cleanupTempFiles();
     if (global.bridge) {
         global.bridge.stop();
     } else {
         process.exit(0);
     }
-});
+}
 
-process.on('SIGTERM', () => {
-    console.log('\n🛑 Остановка...');
-    cleanupTempFiles();
-    if (global.bridge) {
-        global.bridge.stop();
-    } else {
-        process.exit(0);
-    }
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('❌ Необработанная ошибка:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-    console.error('❌ Необработанный reject:', reason);
-});
+process.on('SIGINT', onShutdown);
+process.on('SIGTERM', onShutdown);
+process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
+process.on('unhandledRejection', (reason) => console.error('unhandledRejection:', reason));
 
 async function main() {
-    console.log('🤖 MAX-Telegram Bridge\n');
+    console.log('MAX-Telegram bridge');
 
     const downloadsDir = path.join(__dirname, 'downloads');
     if (!fs.existsSync(downloadsDir)) {
