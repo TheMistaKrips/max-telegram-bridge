@@ -1,3 +1,4 @@
+
 const { Bot } = require('@maxhub/max-bot-api');
 const fs = require('fs');
 const path = require('path');
@@ -60,15 +61,45 @@ class MaxBot {
 
             console.log('📩 Получено сообщение из MAX для пересылки');
 
-            const maxMid = message?.body?.mid;
+            // ✅ ИСПРАВЛЕНО: mid находится в message.mid, НЕ в message.body.mid
+            const maxMid = message?.mid;  // ← Вот здесь основная ошибка была!
             const userName = message?.sender?.first_name || message?.sender?.name || 'Пользователь MAX';
             const attachments = message?.body?.attachments || [];
 
-            // Получаем ID для ответа
+            // ✅ ИСПРАВЛЕНО: Логика получения reply информации
             let tgReplyTo = null;
+            let originalMaxMid = null;
+            
+            // Проверяем наличие link в сообщении
             if (message?.body?.link && message.body.link.type === 'reply') {
-                tgReplyTo = global.msgMap.get(`max_${message.body.link.mid}`);
-                console.log(`📎 Ответ на MAX сообщение ${message.body.link.mid} -> Telegram ID: ${tgReplyTo}`);
+                // ✅ Правильный путь к mid исходного сообщения
+                originalMaxMid = message.body.link.message?.mid;
+                
+                if (originalMaxMid) {
+                    // Ищем соответствие в msgMap
+                    tgReplyTo = global.msgMap.get(`max_${originalMaxMid}`);
+                    
+                    console.log(`📎 Обнаружен reply в MAX:`);
+                    console.log(`  - Текущее сообщение MID: ${maxMid}`);
+                    console.log(`  - Ответ на MID: ${originalMaxMid}`);
+                    console.log(`  - Соответствует TG ID: ${tgReplyTo}`);
+                    
+                    if (!tgReplyTo) {
+                        console.warn(`⚠️ Не найден Telegram ID для MAX сообщения ${originalMaxMid}`);
+                        console.log(`📋 Доступные ключи в msgMap:`, Array.from(global.msgMap.keys()));
+                    }
+                } else {
+                    console.warn('⚠️ link.message.mid отсутствует в структуре');
+                }
+            } else {
+                console.log('📝 Обычное сообщение (не reply)');
+            }
+
+            // Сохраняем связь для будущих ответов ЕЩЕ ДО отправки
+            // Это важно, чтобы на это сообщение могли ответить позже
+            if (maxMid) {
+                // Временно сохраняем, но реальный TG ID добавим после отправки
+                global.msgMap.set(`max_${maxMid}`, null); // Placeholder
             }
 
             this.queue.add({
@@ -89,6 +120,8 @@ class MaxBot {
 
                         if (attachments.length > 0) {
                             // Отправляем каждое вложение отдельно
+                            let firstSentMessageId = null;
+                            
                             for (let i = 0; i < attachments.length; i++) {
                                 const att = attachments[i];
                                 const url = att.payload?.url || att.url;
@@ -101,7 +134,6 @@ class MaxBot {
                                     // Получаем имя файла из MAX
                                     let fileName = att.payload?.name || att.name || '';
 
-                                    // Если имя пустое, создаем на основе типа
                                     if (!fileName) {
                                         if (att.type === 'image' || att.type === 'photo') {
                                             fileName = `image_${Date.now()}.jpg`;
@@ -115,7 +147,6 @@ class MaxBot {
                                             fileName = `file_${Date.now()}.bin`;
                                         }
                                     } else {
-                                        // Проверяем расширение
                                         const ext = path.extname(fileName);
                                         if (!ext) {
                                             if (att.type === 'image' || att.type === 'photo') {
@@ -149,20 +180,17 @@ class MaxBot {
                                     // Подпись только для первого файла
                                     const fileCaption = (i === 0 && finalText) ? finalText : '';
 
-                                    // Опции для отправки файла
                                     const fileOptions = {
                                         caption: fileCaption,
                                         parse_mode: 'HTML'
                                     };
 
-                                    // Добавляем reply_to_message_id ТОЛЬКО для первого файла
                                     if (i === 0 && tgReplyTo) {
                                         fileOptions.reply_to_message_id = Number(tgReplyTo);
                                     }
 
                                     let sentTgMsg;
 
-                                    // Отправляем в Telegram
                                     if (att.type === 'image' || att.type === 'photo') {
                                         sentTgMsg = await this.telegramBot.bot.sendPhoto(
                                             this.config.telegram.groupId,
@@ -191,11 +219,9 @@ class MaxBot {
 
                                     console.log(`✅ Файл отправлен в Telegram: ${fileName}`);
 
-                                    // Сохраняем связь для ответов
-                                    if (i === 0 && sentTgMsg && sentTgMsg.message_id && maxMid) {
-                                        global.msgMap.set(`tg_${sentTgMsg.message_id}`, maxMid);
-                                        global.msgMap.set(`max_${maxMid}`, sentTgMsg.message_id);
-                                        console.log(`🔗 Связано MAX:${maxMid} <-> TG:${sentTgMsg.message_id}`);
+                                    // Сохраняем ID первого отправленного сообщения
+                                    if (i === 0 && sentTgMsg && sentTgMsg.message_id) {
+                                        firstSentMessageId = sentTgMsg.message_id;
                                     }
 
                                 } catch (fileError) {
@@ -207,6 +233,14 @@ class MaxBot {
                                     }
                                 }
                             }
+                            
+                            // ✅ Сохраняем связь после отправки
+                            if (maxMid && firstSentMessageId) {
+                                global.msgMap.set(`max_${maxMid}`, firstSentMessageId);
+                                global.msgMap.set(`tg_${firstSentMessageId}`, maxMid);
+                                console.log(`🔗 Связано MAX:${maxMid} <-> TG:${firstSentMessageId}`);
+                            }
+                            
                         } else if (finalText) {
                             // Отправляем только текст
                             const sentTgMsg = await this.telegramBot.bot.sendMessage(
@@ -214,11 +248,12 @@ class MaxBot {
                                 finalText,
                                 tgOptions
                             );
-                            console.log(`✅ Текст отправлен в Telegram`);
+                            console.log(`✅ Текст отправлен в Telegram, ID: ${sentTgMsg.message_id}`);
 
+                            // ✅ Сохраняем связь после отправки
                             if (sentTgMsg && sentTgMsg.message_id && maxMid) {
-                                global.msgMap.set(`tg_${sentTgMsg.message_id}`, maxMid);
                                 global.msgMap.set(`max_${maxMid}`, sentTgMsg.message_id);
+                                global.msgMap.set(`tg_${sentTgMsg.message_id}`, maxMid);
                                 console.log(`🔗 Связано MAX:${maxMid} <-> TG:${sentTgMsg.message_id}`);
                             }
                         }
@@ -231,7 +266,7 @@ class MaxBot {
             });
 
         } catch (error) {
-            console.error('Ошибка:', error);
+            console.error('Ошибка в handleMessage:', error);
         }
     }
 }
